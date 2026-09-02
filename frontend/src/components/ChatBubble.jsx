@@ -1,9 +1,49 @@
 import React, { useState } from 'react';
 
 export default function ChatBubble({ message, onSelectSource }) {
-  const { sender, text, sources, confidence, timestamp } = message;
+  const { sender, text, sources, timestamp } = message;
   const isUser = sender === 'user';
   const [copied, setCopied] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const supportsTTS = typeof window !== 'undefined' && 'speechSynthesis' in window;
+
+  const handleReadAloud = () => {
+    if (!supportsTTS || !text || !text.trim()) return;
+    
+    window.speechSynthesis.cancel();
+    
+    const speechText = (
+      message.speech_text ||
+      text
+    )
+      .replace(/\[\s*\d+(?:\s*,\s*\d+)*\s*\]/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    const utterance = new SpeechSynthesisUtterance(
+      speechText
+    );
+    
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+    };
+    
+    utterance.onend = () => {
+      setIsSpeaking(false);
+    };
+    
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+    };
+    
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const handleStop = () => {
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  };
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(text);
@@ -117,6 +157,65 @@ export default function ChatBubble({ message, onSelectSource }) {
           {text}
         </div>
 
+        {/* TTS Controls */}
+        {!isUser && supportsTTS && (
+          <div style={{ marginTop: '12px', display: 'flex' }}>
+            {!isSpeaking ? (
+              <button 
+                onClick={handleReadAloud}
+                aria-label="Read response aloud"
+                title="Read response aloud"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: 'transparent',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-muted)',
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  fontSize: '0.75rem',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = 'hsla(240, 20%, 30%, 0.15)'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+                Read Aloud
+              </button>
+            ) : (
+              <button 
+                onClick={handleStop}
+                aria-label="Stop reading"
+                title="Stop reading"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: 'hsla(0, 70%, 50%, 0.1)',
+                  border: '1px solid hsla(0, 70%, 50%, 0.3)',
+                  color: 'var(--text-primary)',
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  fontSize: '0.75rem',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = 'hsla(0, 70%, 50%, 0.2)'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'hsla(0, 70%, 50%, 0.1)'}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="6" y="6" width="12" height="12" />
+                </svg>
+                Stop
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Sources Attribution Panel */}
         {!isUser && sources && sources.length > 0 && (
           <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--border-color)' }}>
@@ -175,11 +274,6 @@ export default function ChatBubble({ message, onSelectSource }) {
           </div>
         )}
 
-        {!isUser && Number.isFinite(Number(confidence)) && (
-          <div style={{ marginTop: '12px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            Answer confidence: <strong style={{ color: 'var(--accent-emerald)' }}>{Math.round(Number(confidence) * 100)}%</strong>
-          </div>
-        )}
       </div>
     </div>
   );
