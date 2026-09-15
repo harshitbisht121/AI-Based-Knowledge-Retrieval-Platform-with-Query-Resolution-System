@@ -20,13 +20,18 @@ export default function FileUploader({
     'txt',
     'docx',
     'csv',
+    'jpg',
+    'jpeg',
+    'png',
+
   ];
 
 
   useEffect(() => {
     return () => {
       if (pollingRef.current) {
-        clearInterval(pollingRef.current);
+        clearTimeout(pollingRef.current);
+        pollingRef.current = null;
       }
     };
   }, []);
@@ -75,7 +80,8 @@ export default function FileUploader({
 
   const pollUploadStatus = (jobId) => {
     if (pollingRef.current) {
-      clearInterval(pollingRef.current);
+      clearTimeout(pollingRef.current);
+      pollingRef.current = null;
     }
 
     const checkStatus = async () => {
@@ -89,13 +95,7 @@ export default function FileUploader({
           status.status === 'completed' ||
           status.status === 'failed'
         ) {
-          if (pollingRef.current) {
-            clearInterval(
-              pollingRef.current
-            );
-
-            pollingRef.current = null;
-          }
+          pollingRef.current = null;
 
           if (
             status.status === 'completed'
@@ -111,19 +111,28 @@ export default function FileUploader({
               }
             }
           }
+
+          return;
         }
+
+        pollingRef.current = setTimeout(
+          checkStatus,
+          1500
+        );
       } catch (error) {
         console.error(
           'Could not retrieve upload status:',
           error
         );
+
+        pollingRef.current = setTimeout(
+          checkStatus,
+          2000
+        );
       }
     };
 
     checkStatus();
-
-    pollingRef.current =
-      setInterval(checkStatus, 700);
   };
 
 
@@ -147,7 +156,7 @@ export default function FileUploader({
       )
     ) {
       setErrorMessage(
-        'Unsupported file format. Please upload PDF, TXT, DOCX, or CSV.'
+        'Unsupported file format. Please upload PDF, TXT, DOCX, CSV, JPG, JPEG, or PNG.'
       );
 
       setUploadState('error');
@@ -425,57 +434,10 @@ export default function FileUploader({
     return labels[stage];
   };
 
-
   const getStageDetails = (stage) => {
-    if (
-      !processingStatus
-    ) {
-      return '';
-    }
-
-    if (
-      stage === 'chunking' &&
-      processingStatus.chunksCount
-    ) {
-      return `${processingStatus.chunksCount} chunks created`;
-    }
-
-    if (
-      stage === 'embedding' &&
-      processingStatus.embeddingsCount
-    ) {
-      return `${processingStatus.embeddingsCount} embeddings generated`;
-    }
-
-    if (
-      stage === 'storing' &&
-      processingStatus.vectorsStored
-    ) {
-      return `${processingStatus.vectorsStored} vectors stored`;
-    }
-
-    if (
-      stage === 'completed'
-    ) {
-      const chunks =
-        processingStatus.chunksCount ||
-        0;
-
-      const embeddings =
-        processingStatus.embeddingsCount ||
-        0;
-
-      const vectors =
-        processingStatus.vectorsStored ||
-        0;
-
-      return `${chunks} chunks • ${embeddings} embeddings • ${vectors} vectors`;
-    }
-
     return '';
   };
-
-
+  
   const renderProcessingStage = (
     stage
   ) => {
@@ -594,7 +556,7 @@ export default function FileUploader({
         onChange={
           handleFileChange
         }
-        accept=".pdf,.txt,.docx,.csv"
+        accept=".pdf,.txt,.docx,.csv,.jpg,.jpeg,.png"
       />
 
       <div
@@ -733,7 +695,7 @@ export default function FileUploader({
             </p>
 
             <span className="badge badge-blue">
-              PDF, TXT, DOCX, CSV
+              PDF, TXT, DOCX, CSV, Images
               (Max 10MB)
             </span>
           </div>
@@ -985,46 +947,6 @@ export default function FileUploader({
             >
               {fileName}
             </p>
-
-            <div
-              style={{
-                display:
-                  'flex',
-                justifyContent:
-                  'center',
-                gap: '18px',
-                flexWrap:
-                  'wrap',
-                fontSize:
-                  '0.8rem',
-                color:
-                  'var(--text-secondary)',
-              }}
-            >
-              <span>
-                <strong>
-                  {processingStatus?.chunksCount ||
-                    0}
-                </strong>{' '}
-                chunks
-              </span>
-
-              <span>
-                <strong>
-                  {processingStatus?.embeddingsCount ||
-                    0}
-                </strong>{' '}
-                embeddings
-              </span>
-
-              <span>
-                <strong>
-                  {processingStatus?.vectorsStored ||
-                    0}
-                </strong>{' '}
-                vectors
-              </span>
-            </div>
 
             <button
               type="button"

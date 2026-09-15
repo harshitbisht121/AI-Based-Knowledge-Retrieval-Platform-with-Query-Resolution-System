@@ -51,6 +51,7 @@ from app.orchestration.nodes import (
     clarification_node,
     retrieval_node,
     response_generation_node,
+    general_response_node,
     save_memory_node,
 )
 
@@ -119,6 +120,9 @@ def route_after_routing(
     if route == "retrieval":
         return "retrieval"
 
+    if route == "general":
+        return "general_response"
+    
     # Safe fallback.
     return "retrieval"
 
@@ -222,6 +226,11 @@ def build_workflow():
     )
 
     graph.add_node(
+    "general_response",
+    general_response_node,
+    )
+
+    graph.add_node(
         "save_memory",
         save_memory_node,
     )
@@ -257,6 +266,7 @@ def build_workflow():
         route_after_routing,
         {
             "retrieval": "retrieval",
+            "general_response": "general_response",
             "clarification": "clarification",
             "end": END,
         },
@@ -278,6 +288,16 @@ def build_workflow():
     graph.add_edge(
         "retrieval",
         "response_generation",
+    )
+
+    # General Response → Save Memory OR END
+    graph.add_conditional_edges(
+        "general_response",
+        route_after_response,
+        {
+            "save_memory": "save_memory",
+            "end": END,
+        },
     )
 
     # Response Generation → Save Memory OR END
@@ -312,6 +332,7 @@ def run_workflow(
     clarification_answer: str | None = None,
     clarification_question: str | None = None,
     original_query: str | None = None,
+    user_id: str | None = None,
     db: Session | None = None,
 ) -> dict[str, Any]:
     """
@@ -377,6 +398,7 @@ def run_workflow(
     initial_state: WorkflowState = {
         "query": query.strip(),
         "k": k,
+        "user_id": user_id if user_id else "",
     }
 
     # Optional Milestone 3 values

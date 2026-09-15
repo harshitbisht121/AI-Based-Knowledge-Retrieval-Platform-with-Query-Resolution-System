@@ -1,5 +1,7 @@
+import json
 import re
 import uuid
+from typing import Any
 
 import chromadb
 
@@ -12,6 +14,61 @@ client = chromadb.PersistentClient(
 collection = client.get_or_create_collection(
     name="ai_query_resolution"
 )
+
+
+def _sanitize_metadata_value(value: Any) -> Any:
+    """
+    Convert application metadata into a Chroma-compatible value.
+
+    Chroma accepts primitive metadata values and flat homogeneous lists of
+    primitive values. Layout-aware OCR metadata can contain nested structures
+    such as:
+
+        [[640.0, 9.0], [768.0, 9.0], [768.0, 33.0], [640.0, 33.0]]
+
+    which Chroma rejects. Preserve those structures by serializing them to
+    JSON strings at the storage boundary. The OCR/layout processing itself
+    can continue to use the original Python structures before persistence.
+    """
+
+    if value is None:
+        return ""
+
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, (list, tuple, dict)):
+        # Flat primitive lists are valid Chroma metadata, so preserve them.
+        if isinstance(value, (list, tuple)):
+            if all(isinstance(item, (str, int, float, bool)) for item in value):
+                return list(value)
+
+        # Nested lists / dicts / mixed structures must be serialized.
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    # Handle numpy scalar values or other scalar-like objects without adding
+    # a hard dependency on NumPy here.
+    try:
+        if hasattr(value, "item"):
+            scalar = value.item()
+            if isinstance(scalar, (str, int, float, bool)):
+                return scalar
+    except Exception:
+        pass
+
+    return str(value)
+
+
+def _sanitize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a Chroma-safe copy without mutating the original metadata."""
+
+    if not isinstance(metadata, dict):
+        return {}
+
+    return {
+        str(key): _sanitize_metadata_value(value)
+        for key, value in metadata.items()
+    }
 
 
 def add_documents(
@@ -44,6 +101,13 @@ def add_documents(
             "Number of chunks and metadata entries must be the same."
         )
 
+    # Sanitize metadata only at the Chroma persistence boundary.
+    # This preserves the layout-aware structures everywhere upstream.
+    safe_metadatas = [
+        _sanitize_metadata(metadata)
+        for metadata in metadatas
+    ]
+
     # Create a unique ID for every stored chunk.
     ids = [
         f"{document_id or uuid.uuid4().hex}_{i}"
@@ -55,7 +119,7 @@ def add_documents(
         ids=ids,
         documents=chunks,
         embeddings=embeddings,
-        metadatas=metadatas,
+        metadatas=safe_metadatas,
     )
 
     print(
@@ -73,6 +137,18 @@ def delete_documents(document_id):
     )
 
 
+def delete_documents_for_user(document_id, user_id):
+    """Delete vectors for a specific document owned by user."""
+    collection.delete(
+        where={
+            "$and": [
+                {"document_id": document_id},
+                {"user_id": user_id},
+            ]
+        }
+    )
+
+
 def search_documents(
     query_embedding,
     k=3,
@@ -83,6 +159,21 @@ def search_documents(
             query_embedding
         ],
         n_results=k,
+    )
+
+
+def search_documents_for_user(
+    query_embedding,
+    user_id,
+    k=3,
+):
+    """Semantic search filtered by user_id."""
+    return collection.query(
+        query_embeddings=[
+            query_embedding
+        ],
+        n_results=k,
+        where={"user_id": user_id},
     )
 
 
@@ -131,6 +222,29 @@ def search_exact_documents(
         ]
     )
 
+    return _process_exact_search_results(stored_data, terms)
+
+
+def search_exact_documents_for_user(
+    terms,
+    user_id,
+):
+    """Exact search filtered by user_id."""
+    if not terms:
+        return []
+
+    stored_data = collection.get(
+        where={"user_id": user_id},
+        include=[
+            "documents",
+            "metadatas",
+        ]
+    )
+
+    return _process_exact_search_results(stored_data, terms)
+
+
+def _process_exact_search_results(stored_data, terms):
     documents = (
         stored_data.get(
             "documents",
@@ -193,79 +307,14 @@ def search_exact_documents(
                 "content": content,
                 "metadata": metadata or {},
                 "matched_terms": matched_terms,
-                "distance": None,
             }
         )
 
     return matches
 
 
-def format_results(
-    query,
-    results,
-):
-    # Convert ChromaDB results into the API response format.
-    documents = (
-        results.get(
-            "documents",
-            [[]]
-        )[0]
-        if results.get("documents")
-        else []
-    )
-
-    metadatas = (
-        results.get(
-            "metadatas",
-            [[]]
-        )[0]
-        if results.get("metadatas")
-        else []
-    )
-
-    distances = (
-        results.get(
-            "distances",
-            [[]]
-        )[0]
-        if results.get("distances")
-        else []
-    )
-
-    formatted_results = []
-
-    for index, content in enumerate(
-        documents
-    ):
-        metadata = (
-            metadatas[index]
-            if index < len(metadatas)
-            else {}
-        )
-
-        distance = (
-            distances[index]
-            if index < len(distances)
-            else None
-        )
-
-        formatted_results.append(
-            {
-                "content": content,
-                "metadata": metadata or {},
-                "distance": distance,
-            }
-        )
-
-    return {
-        "success": True,
-        "query": query,
-        "results": formatted_results,
-        "count": len(formatted_results),
-    }
-
-
 if __name__ == "__main__":
+
     # Run a simple storage check when this file is executed directly.
     print("ChromaDB service check")
     print(f"Database path: {CHROMA_DB_PATH}")
