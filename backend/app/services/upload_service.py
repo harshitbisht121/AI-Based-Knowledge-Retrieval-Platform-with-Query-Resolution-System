@@ -15,7 +15,7 @@ from app.core.database import SessionLocal
 from app.core.models import KnowledgeBaseDocument
 
 from app.rag.chromadb_service import add_documents
-from app.rag.chunking import chunk_text
+from app.rag.chunking import chunk_text_with_sections
 from app.rag.embedding import embed_chunks, load_embedding_model
 from app.rag.extractor import extract_document
 
@@ -331,11 +331,22 @@ def process_uploaded_document(
         )
 
         chunks = []
+        chunk_records = []
 
         chunking_start = time.perf_counter()
 
+        document_file_type = file_path.suffix.lower().lstrip(".")
+
         if full_text:
-            chunks = chunk_text(full_text)
+            chunk_records = chunk_text_with_sections(
+                full_text,
+                file_type=document_file_type,
+            )
+            chunks = [
+                record.get("content", "")
+                for record in chunk_records
+                if record.get("content")
+            ]
 
         chunking_time = time.perf_counter() - chunking_start
 
@@ -349,16 +360,42 @@ def process_uploaded_document(
         # Metadata for normal extracted text
         # -----------------------------------------------------------
 
-        metadatas = [
-            {
+        metadatas = []
+        for index, chunk in enumerate(chunks):
+            record = (
+                chunk_records[index]
+                if index < len(chunk_records)
+                else {}
+            )
+
+            is_csv_row = (
+                document_file_type == "csv"
+                and record.get("record_type") == "csv_row"
+            )
+
+            metadata = {
                 "document_id": document_id,
                 "filename": original_filename,
                 "chunk_index": index,
-                "source_type": "text",
+                "source_type": (
+                    "csv_row"
+                    if is_csv_row
+                    else "text"
+                ),
                 "user_id": str(user_id) if user_id else "",
             }
-            for index in range(len(chunks))
-        ]
+
+            if is_csv_row:
+                metadata["record_type"] = "csv_row"
+                row_number = record.get("csv_row_number")
+                if row_number is not None:
+                    metadata["csv_row_number"] = str(row_number)
+
+            section_heading = record.get("section_heading")
+            if section_heading:
+                metadata["section_heading"] = section_heading
+
+            metadatas.append(metadata)
 
         # -----------------------------------------------------------
         # Add OCR-derived page/image chunks

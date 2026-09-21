@@ -63,6 +63,7 @@ export function getAuthHeaders(includeJsonContentType = false) {
   }
 
   headers.Accept = 'application/json';
+  headers['ngrok-skip-browser-warning'] = 'true';
 
   const token = getAuthToken();
 
@@ -156,6 +157,7 @@ export async function loginUser(email, password) {
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        'ngrok-skip-browser-warning': 'true',
       },
       body: JSON.stringify({
         email: email.trim(),
@@ -183,6 +185,7 @@ export async function registerUser(
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        'ngrok-skip-browser-warning': 'true',
       },
       body: JSON.stringify({
         full_name: fullName.trim(),
@@ -213,6 +216,7 @@ export async function getCurrentUser() {
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
+        'ngrok-skip-browser-warning': 'true',
       },
     },
   );
@@ -244,6 +248,7 @@ export async function logoutUser(token = null) {
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${authToken}`,
+        'ngrok-skip-browser-warning': 'true',
       },
     },
   );
@@ -339,6 +344,11 @@ export async function uploadDocument(
       'Accept',
       'application/json',
     );
+
+    xhr.setRequestHeader(
+      'ngrok-skip-browser-warning',
+      'true',
+);
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
@@ -804,6 +814,56 @@ export async function getAdminUser(userId) {
 
   return parseResponse(response);
 }
+
+export async function updateAdminUserStatus(userId, isActive) {
+  const response = await fetch(
+    `${API_BASE_URL}/admin/users/${encodeURIComponent(userId)}/status`,
+    {
+      method: 'PATCH',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify({ is_active: Boolean(isActive) }),
+    },
+  );
+
+  return parseResponse(response);
+}
+
+
+export async function updateAdminUserRole(userId, role) {
+  const response = await fetch(
+    `${API_BASE_URL}/admin/users/${encodeURIComponent(userId)}/role`,
+    {
+      method: 'PATCH',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify({ role }),
+    },
+  );
+
+  return parseResponse(response);
+}
+
+// Backward-compatible helper for callers that only need promotion.
+export async function promoteAdminUser(userId) {
+  return updateAdminUserRole(userId, 'Admin');
+}
+
+export async function demoteAdminUser(userId) {
+  return updateAdminUserRole(userId, 'User');
+}
+
+
+export async function deleteAdminUser(userId) {
+  const response = await fetch(
+    `${API_BASE_URL}/admin/users/${encodeURIComponent(userId)}`,
+    {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    },
+  );
+
+  return parseResponse(response);
+}
+
 
 export async function getAdminDocuments() {
   const response = await fetch(

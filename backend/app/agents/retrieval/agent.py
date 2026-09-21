@@ -329,6 +329,104 @@ class RetrievalAgent:
             RetrievalAgent._chunk_index(result),
         )
 
+    @staticmethod
+    def _is_csv_row_result(
+        result: dict[str, Any],
+    ) -> bool:
+        """Return True for a retrieval result representing one CSV row."""
+        metadata = result.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return False
+
+        return (
+            str(metadata.get("record_type", "")).lower() == "csv_row"
+            or str(metadata.get("source_type", "")).lower() == "csv_row"
+        )
+
+    @classmethod
+    def _select_unique_csv_exact_results(
+        cls,
+        exact_results: list[dict[str, Any]],
+        exact_terms: list[str],
+    ) -> list[dict[str, Any]]:
+        """
+        Select complete CSV rows for exact terms that identify one record.
+
+        This prevents semantic neighbours from being added to an exact-row
+        lookup while remaining safe for non-unique terms such as a year that
+        occurs on many rows. When one exact term uniquely identifies a CSV row,
+        only that row is eligible for final context.
+        """
+        csv_results = [
+            result
+            for result in exact_results
+            if isinstance(result, dict) and cls._is_csv_row_result(result)
+        ]
+
+        if not csv_results or not exact_terms:
+            return []
+
+        unique_terms: list[str] = []
+
+        for term in exact_terms:
+            normalized_term = str(term).strip().lower()
+            if not normalized_term:
+                continue
+
+            matched_results = []
+            for result in csv_results:
+                matched_terms = result.get("matched_terms", [])
+                if not isinstance(matched_terms, list):
+                    continue
+
+                if any(
+                    str(matched).strip().lower() == normalized_term
+                    for matched in matched_terms
+                ):
+                    matched_results.append(result)
+
+            if len(matched_results) == 1:
+                unique_terms.append(str(term).strip())
+
+        if not unique_terms:
+            return []
+
+        selected: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str | None, int | None] | str] = set()
+
+        normalized_unique_terms = {
+            term.lower()
+            for term in unique_terms
+        }
+
+        for result in csv_results:
+            matched_terms = result.get("matched_terms", [])
+            if not isinstance(matched_terms, list):
+                continue
+
+            has_unique_term = any(
+                str(matched).strip().lower() in normalized_unique_terms
+                for matched in matched_terms
+            )
+
+            if not has_unique_term:
+                continue
+
+            key = cls._chunk_key(result)
+            dedupe_key: tuple[str | None, int | None] | str = (
+                key
+                if key != (None, None)
+                else cls._normalize_content(result.get("content", ""))
+            )
+
+            if dedupe_key in seen_keys:
+                continue
+
+            seen_keys.add(dedupe_key)
+            selected.append(dict(result))
+
+        return selected
+
     # Section detection
 
     @staticmethod
@@ -365,18 +463,44 @@ class RetrievalAgent:
     @classmethod
     def _extract_heading(
         cls,
-        content: str,
+        result_or_content: Any,
     ) -> str | None:
         """
-        Return the first heading-like line in a chunk.
+        Return the stored logical section heading when available.
+
+        Image/OCR extraction stores the section title in
+        ``metadata["section_heading"]``. Prefer that authoritative value
+        over rediscovering a heading from flattened OCR text. The original
+        content-based detector remains as a fallback for documents that do
+        not provide section metadata.
         """
 
-        if not content:
+        content = result_or_content
+
+        if isinstance(result_or_content, dict):
+            metadata = result_or_content.get("metadata")
+            if isinstance(metadata, dict):
+                section_heading = metadata.get("section_heading")
+                if isinstance(section_heading, str) and section_heading.strip():
+                    return section_heading.strip().lower()
+
+            content = result_or_content.get("content", "")
+
+        if not isinstance(content, str) or not content:
             return None
 
         for line in content.splitlines():
 
             cleaned = line.strip()
+
+            # Ignore ingestion/storage wrapper lines. These are not logical
+            # document sections and must never become the active heading.
+            if re.match(
+                r"^(file name|page|image|image ocr section|image ocr fallback)\b",
+                cleaned,
+                flags=re.IGNORECASE,
+            ):
+                continue
 
             if cls._looks_like_heading(cleaned):
                 return cleaned.rstrip(":").strip().lower()
@@ -427,14 +551,7 @@ class RetrievalAgent:
         Score a chunk for section relevance based on its heading.
         """
 
-        heading = cls._extract_heading(
-            str(
-                result.get(
-                    "content",
-                    "",
-                )
-            )
-        )
+        heading = cls._extract_heading(result)
 
         if not heading:
             return 0
@@ -564,6 +681,49 @@ class RetrievalAgent:
         ):
             return ranked_candidates[:final_k]
 
+        # When a completeness query lands in a section that spans multiple
+        # chunks, prefer chunks carrying the exact same logical section
+        # heading. This is stronger than relying only on physical adjacency
+        # and prevents a neighboring section from being substituted when
+        # chunk boundaries fall inside a list or section.
+        anchor_heading = self._extract_heading(anchor)
+        if anchor_heading:
+            same_section_candidates = []
+
+            for candidate in candidate_pool:
+                if not isinstance(candidate, dict):
+                    continue
+
+                if self._document_id(candidate) != anchor_document:
+                    continue
+
+                candidate_heading = self._extract_heading(candidate)
+                if not candidate_heading:
+                    continue
+
+                if candidate_heading.strip().lower() != anchor_heading.strip().lower():
+                    continue
+
+                candidate_index = self._chunk_index(candidate)
+                if candidate_index is None:
+                    continue
+
+                same_section_candidates.append(candidate)
+
+            if len(same_section_candidates) > 1:
+                same_section_candidates.sort(
+                    key=lambda item: (
+                        self._chunk_index(item)
+                        if self._chunk_index(item) is not None
+                        else 10**9,
+                    )
+                )
+
+                # For a complete-list query, retain the earliest chunks of
+                # the matched section so the section introduction/list start
+                # is not lost when the semantic anchor falls later in it.
+                return same_section_candidates[:final_k]
+
         selected_keys.add(
             (
                 anchor_document,
@@ -591,14 +751,7 @@ class RetrievalAgent:
             if next_chunk is None:
                 break
 
-            heading = self._extract_heading(
-                str(
-                    next_chunk.get(
-                        "content",
-                        "",
-                    )
-                )
-            )
+            heading = self._extract_heading(next_chunk)
 
             # If a new strong heading begins, stop the current section.
             if heading:
@@ -816,12 +969,28 @@ class RetrievalAgent:
             ):
                 exact_results = []
 
-        # 3. Merge semantic + exact candidates
-
-        candidates = self._merge_results(
-            semantic_results=semantic_results,
-            exact_results=exact_results,
+        # 3. Prefer an atomic CSV row when an exact term uniquely identifies
+        # one CSV record. This is deliberately limited to structured CSV rows
+        # so normal prose/PDF/DOCX retrieval keeps the established behavior.
+        structured_csv_exact_results = (
+            self._select_unique_csv_exact_results(
+                exact_results,
+                exact_terms,
+            )
         )
+
+        exact_row_lookup_active = bool(
+            structured_csv_exact_results
+        )
+
+        if exact_row_lookup_active:
+            candidates = structured_csv_exact_results
+        else:
+            # 3b. Normal semantic + exact candidate merging
+            candidates = self._merge_results(
+                semantic_results=semantic_results,
+                exact_results=exact_results,
+            )
 
         # 4. Query-aware reranking
 
@@ -867,7 +1036,13 @@ class RetrievalAgent:
 
         else:
 
-            if self.enable_diversification:
+            if exact_row_lookup_active:
+                # Never append semantic neighbours once a unique CSV row has
+                # been identified. The complete row is the authoritative
+                # context for this lookup.
+                final_results = ranked_results[:final_k]
+
+            elif self.enable_diversification:
 
                 final_results = diversify_results(
                     ranked_results,
@@ -918,6 +1093,7 @@ class RetrievalAgent:
                 "completeness_query": (
                     is_completeness_query
                 ),
+                "structured_csv_exact_match": exact_row_lookup_active,
             },
         }
 
